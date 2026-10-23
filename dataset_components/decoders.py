@@ -303,20 +303,21 @@ def decode_data(sample, domain):
     decoded_sample = {}
 
     # Verify image/camera data exists.
-    camera_keys = []
-    for key in sample.keys():
-        if key.endswith('_initial_rgb.jpg'):
-            camera_key = key.replace('_initial_rgb.jpg', '')
-            if camera_key not in camera_keys:
-                camera_keys.append(camera_key)
-    assert len(camera_keys) > 0, "No camera keys found in sample"
+    if 'pushing' not in domain and 'folding' not in domain and 'mould' not in domain and 'pickup' not in domain:
+        camera_keys = []
+        for key in sample.keys():
+            if key.endswith('_initial_rgb.jpg'):
+                camera_key = key.replace('_initial_rgb.jpg', '')
+                if camera_key not in camera_keys:
+                    camera_keys.append(camera_key)
+        assert len(camera_keys) > 0, "No camera keys found in sample"
 
-    # Assert that we have the required keys for each camera
-    for camera_key in camera_keys:
-        required_keys = [f'{camera_key}_initial_rgb.jpg', f'{camera_key}_initial_depth.npy',
-                         f'{camera_key}_intrinsic.npy', f'{camera_key}_extrinsic.npy']
-        for req_key in required_keys:
-            assert req_key in sample, f"Required key {req_key} not found in sample"
+        # Assert that we have the required keys for each camera
+        for camera_key in camera_keys:
+            required_keys = [f'{camera_key}_initial_rgb.jpg', f'{camera_key}_initial_depth.npy',
+                            f'{camera_key}_intrinsic.npy', f'{camera_key}_extrinsic.npy']
+            for req_key in required_keys:
+                assert req_key in sample, f"Required key {req_key} not found in sample"
 
     for k, v in sample.items():
         if k.endswith(".npy"):
@@ -418,6 +419,36 @@ def _get_droid_scene_data(sample: dict) -> dict:
             scene_data[camera_key][img_key.replace('initial_', '')] = sample[key_new]
     return scene_data
 
+def _get_pushing_scene_data(sample):
+    scene_data = {}
+    # Find view prefixes (view0, view1, etc.)
+    view_keys = set()
+    for key in sample.keys():
+        if key.endswith('_scene_flows'):
+            view_keys.add(key.split('_scene_flows')[0])
+    
+    for view_key in sorted(view_keys):
+        flows = sample[f'{view_key}_scene_flows']
+        view_data = {
+            'scene_flows': flows,
+            'scene_colors': np.zeros(  # dummy colors
+                flows.shape[:2] + (3,),
+                dtype=np.uint8
+            ),
+            'scene_visibility': sample.get(
+                f'{view_key}_scene_visibility',
+                np.ones(flows.shape[:2], dtype=bool)
+            ),
+            'scene_depth_valid_mask': np.ones(
+                flows.shape[:2], dtype=bool
+            ),
+        }
+        normals = sample.get(f'{view_key}_scene_normals')
+        if normals is not None:
+            view_data['scene_normals'] = normals
+        scene_data[view_key] = view_data
+    return scene_data
+
 
 def _flatten_camera_scene_data(decoded_scene_data: dict, raw_sample: dict) -> dict:
     """Turn per-camera decoded scene dict into flattened key-value pairs.
@@ -428,7 +459,8 @@ def _flatten_camera_scene_data(decoded_scene_data: dict, raw_sample: dict) -> di
     camera_data = {}
     for camera_key, camera_info in decoded_scene_data.items():
         camera_data[f"{camera_key}_scene_flows"] = camera_info['scene_flows']
-        camera_data[f"{camera_key}_scene_normals"] = camera_info['scene_normals']
+        if 'scene_normals' in camera_info:
+            camera_data[f"{camera_key}_scene_normals"] = camera_info['scene_normals']
         camera_data[f"{camera_key}_scene_colors"] = camera_info['scene_colors']
         camera_data[f"{camera_key}_scene_visibility"] = camera_info['scene_visibility']
         camera_data[f"{camera_key}_scene_depth_valid_mask"] = (
@@ -465,6 +497,10 @@ def build_flow_sample(sample, domain, robot_sampler, max_robot_points: int,
     elif 'droid' in domain:
         # Handle droid (real) data directly
         decoded_scene_data = _get_droid_scene_data(sample)
+    elif 'pushing' in domain or 'folding' in domain or 'mould' in domain or 'pickup' in domain:
+        # Scene data (block particles / cloth vertices) is already in world
+        # frame and stored under view0_*; just reorganize it.
+        decoded_scene_data = _get_pushing_scene_data(sample)
     else:
         raise ValueError(f"Unsupported domain: {domain}. Only 'behavior' and 'droid' are supported.")
     sampler_filter = gripper_filter if not (force_single_arm and gripper_filter == 'both') else 'both'

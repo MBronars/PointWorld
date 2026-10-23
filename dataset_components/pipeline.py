@@ -50,6 +50,7 @@ from dataset_components.transforms import (
     filter_within_bounds,
     grid_sample_transform,
     make_gt_copy,
+    merge_gripper_into_scene,
     normalize_colors,
     random_flip_transform,
     random_rotate_around_z_axis,
@@ -97,6 +98,8 @@ def sample_transform_pipeline(dataset, data_dir, domain, mode, args, has_bimanua
     # -------------------------------------
     # mode-specific sample-specific transformations
     # -------------------------------------
+    include_gripper_in_scene = bool(getattr(args, 'include_gripper_in_scene', False))
+
     if mode == 'train':
         if args.deterministic_train:
             dataset = (
@@ -108,6 +111,11 @@ def sample_transform_pipeline(dataset, data_dir, domain, mode, args, has_bimanua
                     handler=wds.warn_and_continue)
                 .map(center_shift)
                 .map(normalize_colors)
+            )
+            if include_gripper_in_scene:
+                dataset = dataset.map(merge_gripper_into_scene)
+            dataset = (
+                dataset
                 .map(make_gt_copy)
                 .map(partial(sample_and_apply_scene_context_mask, random_context_mode=RELEASE_RANDOM_CONTEXT_MODE, context_horizon=RELEASE_CONTEXT_HORIZON))
             )
@@ -116,7 +124,7 @@ def sample_transform_pipeline(dataset, data_dir, domain, mode, args, has_bimanua
                 dataset
                 .map(partial(grid_sample_transform, grid_size=args.grid_size, mode=mode))
                 .map(partial(sphere_crop_transform,
-                    prob=RELEASE_SPHERECROP_PROB,
+                    prob=RELEASE_SPHERECROP_PROB if getattr(args, 'sphere_crop', True) else 0.0,
                     min_radius=RELEASE_SPHERECROP_MIN_R,
                     max_radius=RELEASE_SPHERECROP_MAX_R,
                     buffer=RELEASE_SPHERECROP_BUFFER,
@@ -142,6 +150,11 @@ def sample_transform_pipeline(dataset, data_dir, domain, mode, args, has_bimanua
                             p=RELEASE_CHROMATIC_JITTER_PROB,
                             std=RELEASE_CHROMATIC_JITTER_STD))
                 .map(normalize_colors)
+            )
+            if include_gripper_in_scene:
+                dataset = dataset.map(merge_gripper_into_scene)
+            dataset = (
+                dataset
                 .map(make_gt_copy)
                 .map(partial(sample_and_apply_scene_context_mask, random_context_mode=RELEASE_RANDOM_CONTEXT_MODE, context_horizon=RELEASE_CONTEXT_HORIZON))
             )
@@ -155,6 +168,11 @@ def sample_transform_pipeline(dataset, data_dir, domain, mode, args, has_bimanua
                 handler=wds.warn_and_continue)
             .map(center_shift)
             .map(normalize_colors)
+        )
+        if include_gripper_in_scene:
+            dataset = dataset.map(merge_gripper_into_scene)
+        dataset = (
+            dataset
             .map(make_gt_copy)
             .map(partial(sample_and_apply_scene_context_mask, random_context_mode=RELEASE_RANDOM_CONTEXT_MODE, context_horizon=RELEASE_CONTEXT_HORIZON))
         )
@@ -172,7 +190,7 @@ def sample_transform_pipeline(dataset, data_dir, domain, mode, args, has_bimanua
         'robot_flows',
         'robot_features',
         'joint_positions',
-        'gripper_positions',
+        # 'gripper_positions',
         'gt_scene_flows',
         'scene_context_mask',
         '__key__',
@@ -269,7 +287,7 @@ def apply_release_pipeline_to_sample(
             sample = grid_sample_transform(sample, grid_size=args.grid_size, mode=mode)
             sample = sphere_crop_transform(
                 sample,
-                prob=RELEASE_SPHERECROP_PROB,
+                prob=RELEASE_SPHERECROP_PROB if getattr(args, 'sphere_crop', True) else 0.0,
                 min_radius=RELEASE_SPHERECROP_MIN_R,
                 max_radius=RELEASE_SPHERECROP_MAX_R,
                 buffer=RELEASE_SPHERECROP_BUFFER,

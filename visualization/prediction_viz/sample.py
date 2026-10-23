@@ -104,6 +104,54 @@ def build_sample_from_dictionary(
     hires_suffix = "_initial_rgb_hires"
     base_suffix = "_initial_rgb"
     prefixes = set()
+    # for key in sample_dict.keys():
+    #     if key.endswith(hires_suffix):
+    #         prefixes.add(key[: -len(hires_suffix)])
+    #     elif key.endswith(base_suffix):
+    #         prefixes.add(key[: -len(base_suffix)])
+
+    # dom = (sample_dict.get("__domain__") or "").lower()
+    # prefer_hires_rgb_only = "droid" in dom
+
+    # for prefix in sorted(prefixes):
+    #     hires_keys = {
+    #         "rgb": f"{prefix}_initial_rgb_hires",
+    #         "depth": f"{prefix}_initial_depth_hires",
+    #         "intr": f"{prefix}_intrinsic_hires",
+    #         "extr": f"{prefix}_extrinsic_hires",
+    #     }
+    #     base_keys = {
+    #         "rgb": f"{prefix}_initial_rgb",
+    #         "depth": f"{prefix}_initial_depth",
+    #         "intr": f"{prefix}_intrinsic",
+    #         "extr": f"{prefix}_extrinsic",
+    #     }
+    #     if prefer_hires_rgb_only:
+    #         rgb_key = hires_keys["rgb"] if hires_keys["rgb"] in sample_dict else base_keys["rgb"]
+    #         keys = {
+    #             "rgb": rgb_key,
+    #             "depth": base_keys["depth"],
+    #             "intr": base_keys["intr"],
+    #             "extr": base_keys["extr"],
+    #         }
+    #     else:
+    #         use_hires = all(k in sample_dict for k in hires_keys.values())
+    #         keys = hires_keys if use_hires else base_keys
+    #     for required in (keys["rgb"], keys["depth"], keys["intr"], keys["extr"]):
+    #         if required not in sample_dict:
+    #             raise KeyError(f"Sample missing required camera field '{required}'")
+    #     cameras.append(
+    #         CameraObservation(
+    #             name=prefix,
+    #             intrinsic=_ensure_float_array(sample_dict[keys["intr"]]),
+    #             extrinsic_world_to_cam=_ensure_float_array(sample_dict[keys["extr"]]),
+    #             rgb=np.asarray(sample_dict[keys["rgb"]]),
+    #             depth=_ensure_float_array(sample_dict[keys["depth"]]),
+    #         )
+    #     )
+    # if not cameras:
+    #     raise RuntimeError("Sample does not contain any camera RGB/depth data")
+    
     for key in sample_dict.keys():
         if key.endswith(hires_suffix):
             prefixes.add(key[: -len(hires_suffix)])
@@ -126,6 +174,7 @@ def build_sample_from_dictionary(
             "intr": f"{prefix}_intrinsic",
             "extr": f"{prefix}_extrinsic",
         }
+
         if prefer_hires_rgb_only:
             rgb_key = hires_keys["rgb"] if hires_keys["rgb"] in sample_dict else base_keys["rgb"]
             keys = {
@@ -137,9 +186,12 @@ def build_sample_from_dictionary(
         else:
             use_hires = all(k in sample_dict for k in hires_keys.values())
             keys = hires_keys if use_hires else base_keys
-        for required in (keys["rgb"], keys["depth"], keys["intr"], keys["extr"]):
-            if required not in sample_dict:
-                raise KeyError(f"Sample missing required camera field '{required}'")
+
+        # --- MODIFIED: Skip this camera if any required field is missing instead of crashing ---
+        missing_fields = [k for k in keys.values() if k not in sample_dict]
+        if missing_fields:
+            continue 
+
         cameras.append(
             CameraObservation(
                 name=prefix,
@@ -149,8 +201,6 @@ def build_sample_from_dictionary(
                 depth=_ensure_float_array(sample_dict[keys["depth"]]),
             )
         )
-    if not cameras:
-        raise RuntimeError("Sample does not contain any camera RGB/depth data")
 
     # Normalize robot kinematics across domains (Panda/droid vs R1Pro/behavior)
     kin: RobotKinematics = parse_robot_kinematics(sample_dict)

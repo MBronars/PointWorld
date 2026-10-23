@@ -71,7 +71,7 @@ def sphere_crop_transform(
     """
     Multi-sphere probabilistic SphereCrop for temporal scene/robot flow data.
     """
-    if np.random.rand() > prob:
+    if prob <= 0 or np.random.rand() > prob:
         return sample
 
     robot_flat = sample["robot_flows"].reshape(-1, 3)
@@ -367,8 +367,10 @@ def center_shift(sample):
 
 def normalize_colors(sample):
     dtype = sample['scene_flows'].dtype
-    sample['scene_colors'] = sample['scene_colors'].astype(dtype) / 255.0
-    sample['robot_colors'] = sample['robot_colors'].astype(dtype) / 255.0
+    if 'scene_colors' in sample:
+        sample['scene_colors'] = sample['scene_colors'].astype(dtype) / 255.0
+    if 'robot_colors' in sample:
+        sample['robot_colors'] = sample['robot_colors'].astype(dtype) / 255.0
     return sample
 
 
@@ -402,10 +404,12 @@ def sample_and_apply_scene_context_mask(
     assert 'gt_scene_flows' in sample, "Expected key 'gt_scene_flows' in sample, so we don't overwrite gt values"
     # iterate through each timestep, if mask is 0, replace with last timestep
     # only apply context mask to scene_flows since we made gt copy of it at this point
+    has_scene_normals = 'scene_normals' in sample
     for t in range(1, T):
         sample['scene_flows'][t] = np.where(scene_context_mask[t], sample['gt_scene_flows'][t], sample['scene_flows'][t-1])
         sample['scene_colors'][t] = np.where(scene_context_mask[t], sample['scene_colors'][t], sample['scene_colors'][t-1])
-        sample['scene_normals'][t] = np.where(scene_context_mask[t], sample['scene_normals'][t], sample['scene_normals'][t-1])
+        if has_scene_normals:
+            sample['scene_normals'][t] = np.where(scene_context_mask[t], sample['scene_normals'][t], sample['scene_normals'][t-1])
     return sample
 
 
@@ -617,6 +621,7 @@ def assert_camera_payload_resolution(sample: dict, expected_hw=(180, 320)) -> di
     rgb_keys = [k for k in sample.keys() if k.endswith("_initial_rgb")]
     depth_keys = [k for k in sample.keys() if k.endswith("_initial_depth")]
     if not rgb_keys and not depth_keys:
+        return sample
         raise RuntimeError("No camera image payload keys found (*_initial_rgb / *_initial_depth)")
 
     for k in rgb_keys:
@@ -650,6 +655,7 @@ def chromatic_auto_contrast_transform(sample, p=0.2, blend_factor=-1, min_contra
     if np.random.rand() >= p:
         return sample
     if 'scene_colors' not in sample:
+        return sample
         raise ValueError("Expected 'scene_colors' in sample for chromatic auto contrast")
 
     # work on first frame in float
@@ -845,6 +851,54 @@ def compute_helper_variables(sample, max_relative_movement, domain=None):
     return sample
 
 
+def merge_gripper_into_scene(sample):
+    """Folding-only, post-hoc: concatenate the robot gripper points into the
+    scene tensors at every frame, so they become part of the predicted
+    particle set. The robot path is left intact so the model still receives
+    the gripper as future conditioning. This is meant to be inserted right
+    after `center_shift` and before `make_gt_copy` in the pipeline; downstream
+    operations (gt copy, context mask, gather_features, compute_helper_variables)
+    just see a larger scene and work without modification.
+
+    The gripper point thus appears as one scene token at t=0 AND as T robot
+    tokens across all frames. PTV3's per-block CPE submanifold sparse conv
+    will see duplicate voxel indices for those; we are deliberately running
+    with this -- spconv 2.x may handle the duplicates by hashing, and the
+    smoke run will tell us if it's actually a problem.
+    """
+    if 'scene_flows' not in sample or 'robot_flows' not in sample:
+        return sample
+    cloth = sample['scene_flows']
+    gripper = sample['robot_flows']
+    T, Nc, _ = cloth.shape
+    Nr = gripper.shape[1]
+    sample['scene_flows'] = np.concatenate([cloth, gripper], axis=1)  # (T, Nc+Nr, 3)
+
+    # Extend every per-scene-point field by Nr columns.
+    if 'scene_visibility' in sample:
+        v = sample['scene_visibility']
+        sample['scene_visibility'] = np.concatenate(
+            [v, np.ones((T, Nr), dtype=v.dtype)], axis=1)
+    if 'scene_colors' in sample:
+        c = sample['scene_colors']
+        sample['scene_colors'] = np.concatenate(
+            [c, np.zeros((T, Nr, 3), dtype=c.dtype)], axis=1)
+    if 'scene_normals' in sample:
+        n = sample['scene_normals']
+        sample['scene_normals'] = np.concatenate(
+            [n, np.zeros((T, Nr, 3), dtype=n.dtype)], axis=1)
+    if 'scene_depth_valid_mask' in sample:
+        dm = sample['scene_depth_valid_mask']
+        sample['scene_depth_valid_mask'] = np.concatenate(
+            [dm, np.ones((T, Nr), dtype=dm.dtype)], axis=1)
+
+    # Tags so downstream eval code can recover the cloth-only / gripper-only
+    # subsets if needed.
+    sample['__n_cloth__']   = Nc
+    sample['__n_gripper__'] = Nr
+    return sample
+
+
 __all__ = [
     "sphere_crop_transform",
     "grid_sample_transform",
@@ -865,4 +919,5 @@ __all__ = [
     "chromatic_jitter_transform",
     "enforce_max_num_points",
     "compute_helper_variables",
+    "merge_gripper_into_scene",
 ]

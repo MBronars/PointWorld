@@ -42,6 +42,12 @@ DATA_CONTRACT_KEYS = (
     "domains",
 )
 
+# Model-contract keys added after checkpoints were already written. A checkpoint without one
+# was trained with the default, so the default is what it gets back.
+OPTIONAL_MODEL_CONTRACT_DEFAULTS = {
+    "pred_horizon": 10,
+}
+
 def _cast_optional_int(value: Any) -> int | None:
     if value is None:
         return None
@@ -61,6 +67,7 @@ _MODEL_CASTERS = {
     "train_max_num_cameras": _cast_optional_int,
     "eval_min_num_cameras": int,
     "eval_max_num_cameras": int,
+    "pred_horizon": int,
 }
 
 _MODEL_ARG_FALLBACKS = {
@@ -115,6 +122,12 @@ def _validate_model_contract(model_contract: Mapping[str, Any], context: str) ->
             raise RuntimeError(
                 f"{context} model_contract field '{key}' has invalid value {model_contract[key]!r}."
             ) from exc
+    for key, default in OPTIONAL_MODEL_CONTRACT_DEFAULTS.items():
+        value = model_contract.get(key, default)
+        try:
+            validated[key] = _MODEL_CASTERS[key](value)
+        except Exception as exc:
+            raise RuntimeError(f"{context} model_contract field '{key}' has invalid value {value!r}.") from exc
     return validated
 
 
@@ -141,6 +154,8 @@ def build_model_contract_from_args(args: Any, *, context: str = "checkpoint args
             raise RuntimeError(
                 f"{context} field '{key}' has invalid value {raw_value!r} for model contract."
             ) from exc
+    for key, default in OPTIONAL_MODEL_CONTRACT_DEFAULTS.items():
+        out[key] = _MODEL_CASTERS[key](args_map.get(key, default))
     return out
 
 

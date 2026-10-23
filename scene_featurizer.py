@@ -367,28 +367,56 @@ class SceneFeatureEncoder(nn.Module):
     def __init__(self, args, channels, data_info_dict, rank, normalize_scene_features_fn):
         super().__init__()
         self.args = args
+        self.use_2d = not getattr(args, 'no_images', False)
         self.normalize_scene_features = normalize_scene_features_fn
-        self.scene_encoder = SceneEncoder2D(args, channels, data_info_dict, rank)
-        self.scene_raw_feat_proj = nn.Linear(data_info_dict["scene_features_dim"], channels)
-        self.scene_encoder_norm = nn.LayerNorm(channels)
-        self.scene_raw_norm = nn.LayerNorm(channels)
-        self.scene_proj = nn.Linear(channels * 2, channels)
 
+        # if self.use_2d:
+        #     self.scene_encoder = SceneEncoder2D(args, channels, data_info_dict, rank)
+        #     self.scene_encoder_norm = nn.LayerNorm(channels)
+        #     self.scene_proj = nn.Linear(channels * 2, channels)
+
+        self.scene_raw_feat_proj = nn.Linear(data_info_dict["scene_features_dim"], channels)
+        self.scene_raw_norm = nn.LayerNorm(channels)
+
+
+    # def forward(self, data_dict):
+    #     scene_coord0 = data_dict["scene_flows"][:, 0]  # (B, Ns, 3)
+    #     scene_feat0 = data_dict["scene_features"][:, 0]  # (B, Ns, Ds)
+    #     scene_exists0 = data_dict["scene_exists"][:, 0]  # (B, Ns)
+
+    #     scene_feat0 = self.normalize_scene_features(scene_feat0)
+
+    #     camera_data = self.scene_encoder._extract_camera_data(data_dict)
+    #     backbone_scene_feat0 = self.scene_encoder(scene_coord0, scene_exists0, camera_data)
+    #     backbone_scene_feat0 = backbone_scene_feat0.to(scene_feat0.dtype)
+    #     scene_feat0 = torch.cat(
+    #         [
+    #             self.scene_encoder_norm(backbone_scene_feat0),
+    #             self.scene_raw_norm(self.scene_raw_feat_proj(scene_feat0)),
+    #         ],
+    #         dim=-1,
+    #     )
+    #     return self.scene_proj(scene_feat0)
+    
     def forward(self, data_dict):
-        scene_coord0 = data_dict["scene_flows"][:, 0]  # (B, Ns, 3)
-        scene_feat0 = data_dict["scene_features"][:, 0]  # (B, Ns, Ds)
-        scene_exists0 = data_dict["scene_exists"][:, 0]  # (B, Ns)
+        scene_coord0 = data_dict["scene_flows"][:, 0]
+        scene_feat0 = data_dict["scene_features"][:, 0]
+        scene_exists0 = data_dict["scene_exists"][:, 0]
 
         scene_feat0 = self.normalize_scene_features(scene_feat0)
 
-        camera_data = self.scene_encoder._extract_camera_data(data_dict)
-        backbone_scene_feat0 = self.scene_encoder(scene_coord0, scene_exists0, camera_data)
-        backbone_scene_feat0 = backbone_scene_feat0.to(scene_feat0.dtype)
-        scene_feat0 = torch.cat(
-            [
-                self.scene_encoder_norm(backbone_scene_feat0),
-                self.scene_raw_norm(self.scene_raw_feat_proj(scene_feat0)),
-            ],
-            dim=-1,
-        )
-        return self.scene_proj(scene_feat0)
+        # if self.use_2d:
+        #     camera_data = self.scene_encoder._extract_camera_data(data_dict)
+        #     backbone_scene_feat0 = self.scene_encoder(scene_coord0, scene_exists0, camera_data)
+        #     backbone_scene_feat0 = backbone_scene_feat0.to(scene_feat0.dtype)
+        #     scene_feat0 = torch.cat(
+        #         [
+        #             self.scene_encoder_norm(backbone_scene_feat0),
+        #             self.scene_raw_norm(self.scene_raw_feat_proj(scene_feat0)),
+        #         ],
+        #         dim=-1,
+        #     )
+        #     return self.scene_proj(scene_feat0)
+        # else:
+            # No images — just project raw scene features directly
+        return self.scene_raw_norm(self.scene_raw_feat_proj(scene_feat0))

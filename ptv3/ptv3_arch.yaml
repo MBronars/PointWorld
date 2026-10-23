@@ -10,6 +10,17 @@ sizes:
     stride: auto
     enc_patch_size: auto
     dec_patch_size: auto
+  medium:   # small's layout (5 levels, 4 poolings, same depths and heads), wider: 99.1M with our pickup inputs (user, 2026-10-22)
+    channels_max: 192
+    enc_depths: [2, 2, 2, 6, 2]
+    enc_channels: ["channels", "channels", 192, 384, 640]
+    enc_num_head: [2, 4, 8, 16, 32]
+    dec_depths: [2, 2, 2, 2]
+    dec_channels: ["channels", "channels", 192, 384]
+    dec_num_head: [4, 4, 8, 16]
+    stride: auto
+    enc_patch_size: auto
+    dec_patch_size: auto
   base:
     channels_max: 256
     enc_depths: [4, 4, 4, 8, 8, 12, 4]

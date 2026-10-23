@@ -18,6 +18,7 @@ import os
 import subprocess
 import time
 import torch
+import contextlib
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from datetime import datetime
@@ -37,6 +38,11 @@ import math
 from pointworld.base import BaseModel
 from pointworld.checkpoint_contract import apply_model_contract_to_args, read_checkpoint_contract
 from training import checkpointing as checkpointing_utils
+
+
+class _AccumulateOnly(Exception):
+    """Control flow: a micro-batch that accumulated its gradient and does not step the optimizer."""
+
 
 class Trainer:
     def __init__(self, args, inference_only=False, data_info_dict=None):
@@ -136,12 +142,18 @@ class Trainer:
         self.batch_count = 0
         self.curr_run_batch_count = 0
         self.sample_count = 0
+        self.optimizer_step_count = 0   # optimizer updates (== batch_count / grad_accum_steps when accumulating)
+        self._accum_i = 0               # micro-batches accumulated since the last optimizer step
         # load model state dict and update counters
         if checkpoint is not None:
             self.load_checkpoint(checkpoint)
         # Recompute epoch_count from samples seen if training
         if not self.inference_only:
             self.epoch_count = self.sample_count / float(self.train_total_samples)
+        # Budget-matched snapshots are keyed to windows seen, so a resumed leg
+        # picks up at the boundary it left off at rather than snapshotting again.
+        self._last_snapshot_idx = (self.sample_count // self._snapshot_window_stride()
+                                   if self._snapshot_window_stride() else 0)
 
         # ----------------------------------------------------------------------------------
         # Misc setup
@@ -177,7 +189,11 @@ class Trainer:
         """Initialize Torch Distributed if requested and set device."""
         ### DDP CHANGE ###
         if self.args.distributed:
-            dist.init_process_group(backend="nccl", init_method="env://")
+            # PW_NCCL_TIMEOUT_MIN: how long a rank waits for the others in a collective before the job
+            # aborts (torch default 10 min). Unset = default.
+            timeout_min = os.environ.get("PW_NCCL_TIMEOUT_MIN")
+            kw = {"timeout": __import__("datetime").timedelta(minutes=float(timeout_min))} if timeout_min else {}
+            dist.init_process_group(backend="nccl", init_method="env://", **kw)
             self.rank = dist.get_rank()
             self.world_size = dist.get_world_size()
             local_rank = int(os.environ["LOCAL_RANK"])
@@ -279,6 +295,30 @@ class Trainer:
 
     def _save_checkpoint_now(self, adjusted_batch_count, log_dict=None):
         return checkpointing_utils.save_checkpoint_now(self, adjusted_batch_count, log_dict)
+
+    def _snapshot_window_stride(self):
+        """Windows between budget-matched snapshots, or 0 when they are off."""
+        every = int(getattr(self.args, 'snapshot_matched_steps', 0) or 0)
+        if every <= 0:
+            return 0
+        return every * int(getattr(self.args, 'matched_windows_per_step', 32))
+
+    def _maybe_save_matched_snapshot(self, adjusted_batch_count):
+        """Keep a permanent checkpoint every N matched steps of budget.
+
+        The condition is on sample_count, which every rank increments by the same
+        amount, so all ranks agree and enter the (collective) save together.
+        """
+        stride = self._snapshot_window_stride()
+        if not stride or self._accum_i != 0:      # snapshot the weights of a completed optimizer step
+            return
+        idx = self.sample_count // stride
+        if idx <= self._last_snapshot_idx:
+            return
+        self._last_snapshot_idx = idx
+        self._save_checkpoint_now(adjusted_batch_count, log_dict={})
+        matched_step = idx * int(getattr(self.args, 'snapshot_matched_steps', 0))
+        checkpointing_utils.save_matched_snapshot(self, matched_step)
 
     def save_checkpoint(self, log_dict=None):
         return checkpointing_utils.save_checkpoint(self, log_dict)
@@ -391,7 +431,8 @@ class Trainer:
                 adjusted_batch_count = self.curr_run_batch_count // self.world_size
 
                 # eval when batch count since last eval >= eval_freq
-                if self.should_do(self.args.eval_freq, last_eval_batch, adjusted_batch_count):
+                at_boundary = self._accum_i == 0   # no half-accumulated gradient in an eval or a checkpoint
+                if at_boundary and self.should_do(self.args.eval_freq, last_eval_batch, adjusted_batch_count):
                     if self.args.distributed:
                         dist.barrier()
                     # eval on train set
@@ -414,7 +455,7 @@ class Trainer:
                     last_eval_batch = adjusted_batch_count
 
                 # save checkpoint when batch count since last save >= save_freq
-                if self.should_do(self.args.save_freq, last_save_batch, adjusted_batch_count):
+                if at_boundary and self.should_do(self.args.save_freq, last_save_batch, adjusted_batch_count):
                     self._save_checkpoint_now(adjusted_batch_count, log_dict=log_dict)
                     last_save_batch = adjusted_batch_count
 
@@ -433,7 +474,12 @@ class Trainer:
                 self.model.train()
                 train_batch = {k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v for k, v in train_batch.items()}
 
-                self.optimizer.zero_grad(set_to_none=True)
+                accum = max(1, int(getattr(self.args, 'grad_accum_steps', 1)))
+                if self._accum_i == 0:
+                    self.optimizer.zero_grad(set_to_none=True)
+                step_now = (self._accum_i + 1) >= accum     # this micro-batch completes the cycle
+                sync_ctx = (self.model.no_sync() if (self.args.distributed and not step_now)
+                            else contextlib.nullcontext())
 
                 try:
                     with torch.autocast(device_type='cuda', dtype=self.amp_dtype):
@@ -452,7 +498,12 @@ class Trainer:
                     # Check for NaN in total loss before scaling
                     check_tensor_for_nan(total_loss, "total_loss", f"training step (epoch {self.epoch_count:.3f}, batch {train_batch_idx})")
 
-                    scaler.scale(total_loss).backward()
+                    with sync_ctx:
+                        scaler.scale(total_loss / accum).backward()
+                    self._accum_i += 1
+                    if not step_now:
+                        raise _AccumulateOnly()
+                    self._accum_i = 0
                     scaler.unscale_(self.optimizer)
 
                     grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -472,16 +523,22 @@ class Trainer:
                         continue  # Skip this batch and move to next iteration
 
                     # Check model parameters for NaN after gradient computation
-                    check_model_parameters_for_nan(self.model, f"after backward pass (epoch {self.epoch_count:.3f}, batch {train_batch_idx})")
+                    if getattr(self.args, 'param_nan_checks', True):
+                        check_model_parameters_for_nan(self.model, f"after backward pass (epoch {self.epoch_count:.3f}, batch {train_batch_idx})")
 
                     log_dict['grad_norm'] = float(grad_norm)
 
                     scaler.step(self.optimizer)
                     scaler.update()
+                    self.optimizer_step_count += 1
+                    log_dict['optimizer_step_count'] = self.optimizer_step_count
 
                     # Final check for NaN in model parameters after optimizer step
-                    check_model_parameters_for_nan(self.model, f"after optimizer step (epoch {self.epoch_count:.3f}, batch {train_batch_idx})")
+                    if getattr(self.args, 'param_nan_checks', True):
+                        check_model_parameters_for_nan(self.model, f"after optimizer step (epoch {self.epoch_count:.3f}, batch {train_batch_idx})")
                 
+                except _AccumulateOnly:
+                    pass                          # gradient accumulated; counters below still advance
                 except NaNDetectionError as nan_error:
                     # Handle NaN detection error
                     if self.rank == 0:
@@ -539,8 +596,14 @@ class Trainer:
                 log_dict['sample_count'] = self.sample_count
                 curr_steps = self.curr_run_batch_count // self.world_size
 
-                # If we've reached target epochs mid-epoch, save final checkpoint and exit cleanly
-                if self.epoch_count >= self.args.num_epochs:
+                self._maybe_save_matched_snapshot(adjusted_batch_count)
+
+                # If we've reached target epochs mid-epoch, save final checkpoint and exit cleanly.
+                # --budget_windows is the same stop in windows (exact, where epochs come in whole units);
+                # it only fires on an accumulation boundary, so the final checkpoint is a completed step.
+                budget = int(getattr(self.args, 'budget_windows', 0) or 0)
+                if (self.epoch_count >= self.args.num_epochs
+                        or (budget > 0 and self.sample_count >= budget and self._accum_i == 0)):
                     self._save_checkpoint_now(adjusted_batch_count, log_dict={})
                     if self.rank == 0:
                         tepoch.close()

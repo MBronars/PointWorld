@@ -20,6 +20,13 @@ import torch
 ROBOT_URDF_BY_DOMAIN = {
     "behavior": "assets/r1pro/urdf/r1pro.urdf",
     "droid": "assets/franka_description/franka_panda_robotiq_2f85.urdf",
+    "pushing": "assets/pushing_robot/pushing_robot.urdf",
+    # folding has no ARX5 URDF in-repo; its gripper is the pre-baked point
+    # cloud in robot_flows. This entry is only a file-exists placeholder for
+    # the eval visualizer -- it is never actually loaded for folding (the viz
+    # sample has no joint_names, so build_robot_flows returns empty mesh
+    # overlays and renders robot_flows directly as point trajectories).
+    "folding": "assets/pushing_robot/pushing_robot.urdf",
 }
 
 __all__ = [
@@ -92,6 +99,10 @@ def resolve_default_robot_urdf(domains) -> str:
         return ROBOT_URDF_BY_DOMAIN["droid"]
     if any("behavior" in d for d in doms):
         return ROBOT_URDF_BY_DOMAIN["behavior"]
+    if any("pushing" in d for d in doms):
+        return ROBOT_URDF_BY_DOMAIN["pushing"]
+    if any("folding" in d for d in doms):
+        return ROBOT_URDF_BY_DOMAIN["folding"]
     raise ValueError(f"Unsupported domains for robot URDF: {domains}")
 
 

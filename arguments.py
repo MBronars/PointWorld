@@ -23,6 +23,10 @@ LOCAL_DATASET_DIR = os.environ.get('LOCAL_DATASET_DIR', '/dataset')
 DOMAIN_TO_DATA_DIR = {
     'behavior': f'{LOCAL_DATASET_DIR}/behavior/wds',
     'droid': f'{LOCAL_DATASET_DIR}/droid/wds',
+    'pushing': '/data/group_data/katefgroup/VLA/3DPCWM/pushing_data_pointworld',
+    'folding': '/data/group_data/katefgroup/VLA/3DPCWM/folding_data_pointworld',
+    'mould':   '/data/group_data/katefgroup/VLA/3DPCWM/mould_data_pointworld',
+    'pickup':  '/data/group_data/katefgroup/VLA/3DPCWM/pickup_data_pointworld',
 }
 
 def str_to_bool(value):
@@ -81,6 +85,17 @@ def parse_args(skip_command_line=False):
     parser.add_argument('--seed', '-s', type=int, default=-1)
     parser.add_argument('--deterministic_data', '-det', type=str, default='false', help='Use deterministic data')
     parser.add_argument('--deterministic_train', type=str, default='false', help='Use deterministic data pipeline for training (disables resampling)')
+    parser.add_argument('--sphere_crop', type=str, default='true',
+                        help='Training-time multi-sphere crop of scene points far from the robot (released recipe). '
+                             'false = never crop (user, 2026-10-22: dropped for the cloth/new runs)')
+    parser.add_argument('--param_nan_checks', type=str, default='true',
+                        help='Scan every parameter for NaN after backward and after the optimizer step (released '
+                             'behaviour). false skips both scans; the loss NaN check stays. Measured ~6%% of a '
+                             'folding step on a shared A6000 (2026-10-22).')
+    parser.add_argument('--include_gripper_in_scene', type=str, default='false',
+                        help='Folding only: post-hoc merge robot gripper points into scene_flows so they '
+                             'become part of the predicted particle set (no dataset rebuild). Robot '
+                             'conditioning is unchanged.')
     parser.add_argument('--deterministic_algorithms', type=str, default='false',
                         help='Force torch deterministic algorithms (may error if unsupported ops are used)')
     parser.add_argument('--log_dir', '-ld', type=str, default='train_logs')
@@ -94,6 +109,23 @@ def parse_args(skip_command_line=False):
     parser.add_argument('--eval_freq', '-ef', type=int, default=600, help='Evaluate every N batches (equivalent to seconds in previous version)')
     parser.add_argument('--save_freq', '-sf', type=int, default=1800, help='Save checkpoint every N batches (equivalent to seconds in previous version)')
     parser.add_argument('--num_eval_batches', '-ntb', type=int, default=10)
+    parser.add_argument('--snapshot_matched_steps', type=int, default=0,
+                        help='Keep a permanent checkpoint every N steps of the budget this run is '
+                             'matched against (0 disables). The cadence is measured in windows seen, '
+                             'so it is unaffected by batch size or GPU count.')
+    parser.add_argument('--grad_accum_steps', type=int, default=1,
+                        help='Micro-batches of --batch_size accumulated per optimizer step (1 = no accumulation). '
+                             'Windows per optimizer step = batch_size x grad_accum_steps x GPUs.')
+    parser.add_argument('--pred_horizon', type=int, default=10,
+                        help='Predicted frames per window (the model sees 1 context frame). 10 is the PointWorld '
+                             'release; it sizes the dynamics heads, the time embedding and the per-frame stats, and is '
+                             'recorded in the checkpoint contract.')
+    parser.add_argument('--budget_windows', type=int, default=0,
+                        help='Stop once this many training windows have been seen across all legs (0 = only '
+                             '--num_epochs stops). Counted in windows, so it is independent of batch, accumulation '
+                             'and GPU count.')
+    parser.add_argument('--matched_windows_per_step', type=int, default=32,
+                        help='Windows per step of the matched run, used by --snapshot_matched_steps.')
     parser.add_argument('--model_path', type=str, required=False, help='Path to the model checkpoint to load')
     parser.add_argument('--allow_optimizer_reset', type=str, default='false',
                         help='Allow optimizer reset if checkpoint optimizer state is incompatible')
@@ -136,8 +168,10 @@ def parse_args(skip_command_line=False):
     )
     # visualization (train-time visualization removed in release)
     # data
-    parser.add_argument('--robot_features', '-rfeat', type=str, default='robot_flows,robot_colors,robot_normals,gripper_open,robot_velocity,robot_acceleration')
-    parser.add_argument('--scene_features', '-sfeat', type=str, default='scene_flows,scene_colors,scene_normals,gripper_open,dist2robot')
+    # parser.add_argument('--robot_features', '-rfeat', type=str, default='robot_flows,robot_colors,robot_normals,gripper_open,robot_velocity,robot_acceleration')
+    # parser.add_argument('--scene_features', '-sfeat', type=str, default='scene_flows,scene_colors,scene_normals,gripper_open,dist2robot')
+    parser.add_argument('--robot_features', '-rfeat', type=str, default='robot_flows,robot_normals,robot_velocity,robot_acceleration')
+    parser.add_argument('--scene_features', '-sfeat', type=str, default='scene_flows,scene_normals,dist2robot')
     parser.add_argument('--domains', '-dom', type=str, default='', required=False, help='comma separated list of domains')
     # optimizer
     parser.add_argument('--base_lr', type=float, default=0.0001)
@@ -226,24 +260,24 @@ def parse_args(skip_command_line=False):
     args.robot_features = [name.strip() for name in args.robot_features.split(',')]
     args.scene_features = [name.strip() for name in args.scene_features.split(',')]
 
-    expected_robot_features = [
-        'robot_flows', 'robot_colors', 'robot_normals',
-        'gripper_open', 'robot_velocity', 'robot_acceleration',
-    ]
-    expected_scene_features = [
-        'scene_flows', 'scene_colors', 'scene_normals',
-        'gripper_open', 'dist2robot',
-    ]
-    if args.robot_features != expected_robot_features:
-        raise ValueError(
-            f"Unsupported robot_features for release: {args.robot_features}. "
-            f"Expected: {expected_robot_features}"
-        )
-    if args.scene_features != expected_scene_features:
-        raise ValueError(
-            f"Unsupported scene_features for release: {args.scene_features}. "
-            f"Expected: {expected_scene_features}"
-        )
+    # expected_robot_features = [
+    #     'robot_flows', 'robot_colors', 'robot_normals',
+    #     'gripper_open', 'robot_velocity', 'robot_acceleration',
+    # ]
+    # expected_scene_features = [
+    #     'scene_flows', 'scene_colors', 'scene_normals',
+    #     'gripper_open', 'dist2robot',
+    # ]
+    # if args.robot_features != expected_robot_features:
+    #     raise ValueError(
+    #         f"Unsupported robot_features for release: {args.robot_features}. "
+    #         f"Expected: {expected_robot_features}"
+    #     )
+    # if args.scene_features != expected_scene_features:
+    #     raise ValueError(
+    #         f"Unsupported scene_features for release: {args.scene_features}. "
+    #         f"Expected: {expected_scene_features}"
+    #     )
     # validate and default
     args.domains = [name.strip() for name in args.domains.split(',')] if args.domains else []
     if any(domain.startswith('droid') for domain in args.domains):

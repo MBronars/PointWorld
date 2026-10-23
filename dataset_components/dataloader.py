@@ -31,6 +31,8 @@ from dataset_components.constants import (
 from dataset_components.decoders import decode_data, build_flow_sample
 from dataset_components.pipeline import sample_transform_pipeline
 from dataset_components.robot import canonicalize_gripper_keys_and_flags
+from pwm_stream import (build_pwm_source, is_pwm_spec,
+                        nominal_windows as pwm_nominal_windows)
 from robot_sampler import RobotSampler as TorchRobotSampler
 from utils import resolve_robot_urdf
 
@@ -111,6 +113,18 @@ def _resolve_requested_splits(mode, args, override_splits=None):
 
 def build_dataset(data_dir, domain, mode, args, rank=0, has_bimanual_robot=False, override_splits=None, force_resampled_eval=False):
     # -------------------------------------
+    # pwm:// — windows read live from the PWM corpus rather than from shards.
+    # The source differs; every transform after it is the same code on the same
+    # bytes (pwm_stream.py).
+    # -------------------------------------
+    if is_pwm_spec(data_dir):
+        if rank == 0:
+            print(f"[{domain}] {mode}: streaming live from {data_dir}")
+        dataset = build_pwm_source(data_dir, mode, args, rank)
+        return _apply_sample_pipeline(dataset, data_dir, domain, mode, args, rank,
+                                      has_bimanual_robot, robot_sampler=None)
+
+    # -------------------------------------
     # set up webdataset
     # -------------------------------------
     # Support chaining multiple splits for training
@@ -120,15 +134,19 @@ def build_dataset(data_dir, domain, mode, args, rank=0, has_bimanual_robot=False
         return None
 
     # Initialize robot sampler once for this dataset (TorchRobotSampler on CPU).
-    urdf_path = resolve_robot_urdf(domain)
-    if "droid" in domain or "behavior" in domain:
+    # The folding, mould, and pickup domains store gripper point clouds
+    # directly in the shards, so they need no URDF / sampler.
+    if "folding" in domain or "mould" in domain or "pickup" in domain:
+        robot_sampler = None
+    elif "droid" in domain or "behavior" in domain or "pushing" in domain:
+        urdf_path = resolve_robot_urdf(domain)
         robot_sampler = TorchRobotSampler(
             urdf_path=urdf_path,
             gripper_only=RELEASE_GRIPPER_ONLY,
             device="cpu",
         )
     else:
-        raise ValueError(f"Unsupported domain '{domain}' for robot sampler (expected droid or behavior).")
+        raise ValueError(f"Unsupported domain '{domain}' for robot sampler (expected droid, behavior, pushing, folding, mould, or pickup).")
 
     # shuffle the shard paths
     random.Random(args.seed + rank).shuffle(shard_paths)
@@ -158,6 +176,16 @@ def build_dataset(data_dir, domain, mode, args, rank=0, has_bimanual_robot=False
         handler=wds.warn_and_continue,
     )
 
+    return _apply_sample_pipeline(dataset, data_dir, domain, mode, args, rank,
+                                  has_bimanual_robot, robot_sampler)
+
+
+def _apply_sample_pipeline(dataset, data_dir, domain, mode, args, rank,
+                           has_bimanual_robot, robot_sampler):
+    """Everything from decoding to the transform pipeline.
+
+    Shared by the shard source and the pwm:// source so the two cannot diverge.
+    """
     # -------------------------------------
     # decode from tar files, get T-step sequences, shuffle, and sample cameras
     # -------------------------------------
@@ -198,7 +226,9 @@ def build_dataloader(args, mode, rank=0, world_size=1, override_splits=None, for
 
     use_eval_override = getattr(args, '_eval_override_active', False)
     training_domains = getattr(args, 'train_domains_for_eval', args.domains) if use_eval_override else args.domains
-    has_bimanual_robot = any('behavior' in domain for domain in training_domains)
+    # behavior (dual-arm r1pro) and folding (dual-arm ARX5) are bimanual.
+    has_bimanual_robot = any(('behavior' in domain) or ('folding' in domain)
+                             for domain in training_domains)
 
     domain_dir_pairs = list(zip(args.data_dirs, args.domains))
     if use_eval_override:
@@ -215,6 +245,21 @@ def build_dataloader(args, mode, rank=0, world_size=1, override_splits=None, for
         dataset = build_dataset(data_dir, domain, mode, args, rank, has_bimanual_robot, override_splits=override_splits, force_resampled_eval=(force_resampled_eval and mode != 'train'))
         if dataset is not None:  # could be None if no shards are found for particular split for particular domain
             datasets.append(dataset)
+            # A pwm:// source has no shards and no metadata file. Its worker count
+            # is not capped by shards (the PWM datasets partition their own
+            # records per worker) and its sample count is the nominal epoch of
+            # pwm_stream.NOMINAL_WINDOWS, which sets only len(loader) and the
+            # epoch_count the trainer stops on.
+            if is_pwm_spec(data_dir):
+                # Training partitions cleanly across workers (the smallest corpus
+                # here is 196 pickup shards). The held-out splits do not: pickup's
+                # test root is 4 shards, so a fifth worker would get none and its
+                # stream would have nothing to yield. Declaring one "shard" makes
+                # num_workers = min(num_workers, min_num_shards) collapse eval to a
+                # single worker, which is ample for 25 eval batches.
+                num_shards.append(max(1, int(args.num_workers)) if mode == 'train' else 1)
+                total_samples += pwm_nominal_windows(data_dir, mode)
+                continue
             # Count shards for this dataset
             requested_splits = _resolve_requested_splits(mode, args, override_splits)
             shard_paths = gather_shard_paths(data_dir, requested_splits, rank)

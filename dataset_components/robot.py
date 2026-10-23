@@ -177,7 +177,10 @@ def gather_features(
             feat[:, :, 1] = 0.0  # Green
             feat[:, :, 2] = 1.0  # Blue
         elif feat_name == 'gripper_open':
-            if has_bimanual_robot:
+            if 'right_gripper_open' not in sample and 'left_gripper_open' not in sample:
+                # No gripper — emit zeros shaped consistently
+                feat = np.zeros((T, NR, 1), dtype=np.float32)
+            elif has_bimanual_robot:
                 keys = [k for k in ['right_gripper_open', 'left_gripper_open'] if k in sample]
                 feat = _allocate_bimanual_features(sample, keys, 2, has_bimanual_robot)
             else:
@@ -222,6 +225,10 @@ def gather_features(
             feat = feat[None, :, :]  # (1, NS, T)
             assert feat.shape == (1, NS, T)
         else:
+            # Optional scene features (e.g. scene_normals) are silently skipped
+            # when the loader did not produce them for this sample's domain.
+            if feat_name == 'scene_normals' and feat_name not in sample:
+                continue
             assert feat_name in sample, f"Expected key {feat_name} in sample"
             assert sample[feat_name].shape[0] == T, (
                 f"Expected {T} timesteps for {feat_name}, got {sample[feat_name].shape[0]}"
@@ -243,6 +250,14 @@ def _get_robot_flows(sample, robot_sampler, max_robot_points: int, domain: str,
         return _get_robot_flows_behavior(sample, robot_sampler, max_robot_points, gripper_filter, seed=seed)
     if 'droid' in domain:
         return _get_robot_flows_droid(sample, robot_sampler, max_robot_points, seed=seed)
+    if 'pushing' in domain:
+        return _get_robot_flows_pushing(sample, robot_sampler, max_robot_points, seed=seed)
+    if 'folding' in domain:
+        return _get_robot_flows_folding(sample)
+    if 'mould' in domain:
+        return _get_robot_flows_mould(sample)
+    if 'pickup' in domain:
+        return _get_robot_flows_pickup(sample)
     raise ValueError(f"Unsupported domain: {domain}. Only 'behavior' and 'droid' are supported.")
 
 
@@ -431,6 +446,161 @@ def _get_robot_flows_droid(sample, robot_sampler: TorchRobotSampler, max_robot_p
     return robot_data
 
 
+def _get_robot_flows_pushing(sample, robot_sampler, max_robot_points, seed=None):
+    # Particle-based pushing data (push_08_07_pointworld) bakes the gripper
+    # point cloud directly into the shard under ``robot_flows``; no URDF /
+    # pose lookup needed. Same behavior as _get_robot_flows_pickup — read
+    # points, synthesize zero normals + colors.
+    if 'robot_flows' in sample and 'right_gripper_pose' not in sample \
+            and 'gripper_pose' not in sample and 'tcp_pose' not in sample:
+        robot_flows = np.asarray(sample['robot_flows'], dtype=np.float32)
+        assert robot_flows.ndim == 3 and robot_flows.shape[-1] == 3, (
+            f"pushing robot_flows must be (T, NR, 3), got {robot_flows.shape}"
+        )
+        robot_data = {
+            'robot_flows':   robot_flows,
+            'robot_normals': np.zeros_like(robot_flows, dtype=np.float32),
+            'robot_colors':  np.zeros_like(robot_flows, dtype=np.float32),
+        }
+        for key in sample.keys():
+            if not key.startswith('view'):
+                robot_data[key] = sample[key]
+        return robot_data
+
+    # Legacy pose-based pushing data (h5_to_pointworld_wds output): synthesize
+    # gripper geometry from the URDF + right_gripper_pose.
+    robot_sampler.presample(max_robot_points, seed=seed)
+
+    T = sample['joint_positions'].shape[0]
+
+    # Force joints to 0 so the mesh stays at the local origin.
+    zeros = torch.zeros(T, device=robot_sampler.device, dtype=robot_sampler.dtype)
+    joint_dict = {
+        'joint_x': zeros,
+        'joint_y': zeros,
+    }
+
+    # Get local points at the origin
+    robot_flows, robot_colors, robot_normals = robot_sampler.compute_points(joint_dict)
+    robot_flows = robot_flows.cpu().numpy()
+    robot_normals = robot_normals.cpu().numpy()
+    robot_colors = robot_colors.cpu().numpy()
+    
+    # ---------------------------------------------------------
+    # FIX: Find the actual key used in your raw dataset
+    # ---------------------------------------------------------
+    pose_key = None
+    for key in ['right_gripper_pose', 'gripper_pose', 'tcp_pose']:
+        if key in sample:
+            pose_key = key
+            break
+            
+    if pose_key is not None:
+        # print(f"Applying world transform using key: '{pose_key}'")
+        T_g = transform_utils.convert_pose_quat2mat(sample[pose_key]) 
+        
+        # Apply translation & rotation to points
+        ones = np.ones(robot_flows.shape[:-1] + (1,), dtype=robot_flows.dtype)
+        pts_h = np.concatenate([robot_flows, ones], axis=-1)
+        robot_flows = np.einsum('tij,tkj->tki', T_g, pts_h)[..., :3]
+        
+        # Apply rotation to normals
+        R_g = T_g[:, :3, :3]
+        robot_normals = np.einsum('tij,tkj->tki', R_g, robot_normals)
+    else:
+        print("WARNING: No gripper pose found in sample! Points will remain at origin.")
+        print("Available keys in sample:", list(sample.keys()))
+
+    robot_data = {
+        'robot_flows': robot_flows,
+        'robot_normals': robot_normals,
+        'robot_colors': robot_colors,
+    }
+    
+    for key in sample.keys():
+        if not key.startswith('view'):
+            robot_data[key] = sample[key]
+            
+    return robot_data
+
+def _get_robot_flows_pickup(sample):
+    """Robot flows for the 'pickup' domain (Franka Panda pickup_pose data).
+
+    Like folding and mould, the gripper point cloud is baked into the
+    WebDataset shard under key ``robot_flows`` (already centered by the
+    converter). No URDF / RobotSampler — we just read the points directly and
+    synthesize zero normals + colors to keep the feature pipeline happy.
+    """
+    robot_flows = np.asarray(sample['robot_flows'], dtype=np.float32)  # (T, NR, 3)
+    assert robot_flows.ndim == 3 and robot_flows.shape[-1] == 3, (
+        f"pickup robot_flows must be (T, NR, 3), got {robot_flows.shape}"
+    )
+    robot_data = {
+        'robot_flows':   robot_flows,
+        'robot_normals': np.zeros_like(robot_flows),
+        'robot_colors':  np.zeros_like(robot_flows),
+    }
+    for key in sample.keys():
+        if not key.startswith('view'):
+            robot_data[key] = sample[key]
+    return robot_data
+
+
+def _get_robot_flows_mould(sample):
+    """Robot flows for the 'mould' domain.
+
+    Like folding, the gripper point cloud is baked into the WebDataset shard
+    under key ``robot_flows`` (already centered by the converter). The mould
+    paddle is a rigid box — no URDF / RobotSampler — so we just read the
+    points directly and synthesize zero normals + colors to keep the feature
+    pipeline happy.
+    """
+    robot_flows = np.asarray(sample['robot_flows'], dtype=np.float32)  # (T, NR, 3)
+    assert robot_flows.ndim == 3 and robot_flows.shape[-1] == 3, (
+        f"mould robot_flows must be (T, NR, 3), got {robot_flows.shape}"
+    )
+    robot_data = {
+        'robot_flows':   robot_flows,
+        'robot_normals': np.zeros_like(robot_flows),
+        'robot_colors':  np.zeros_like(robot_flows),
+    }
+    for key in sample.keys():
+        if not key.startswith('view'):
+            robot_data[key] = sample[key]
+    return robot_data
+
+
+def _get_robot_flows_folding(sample):
+    """Get robot flows for the cloth-folding domain.
+
+    Unlike pushing/droid/behavior, the bimanual gripper point clouds are baked
+    into the WebDataset shard (key ``robot_flows``, already in world frame and
+    pre-centered by the converter). There is no URDF / RobotSampler: we read the
+    points directly, synthesize zero normals (the converter has no per-point
+    gripper normals), and pass everything else through.
+    """
+    robot_flows = np.asarray(sample['robot_flows'], dtype=np.float32)  # (T, NR, 3)
+    assert robot_flows.ndim == 3 and robot_flows.shape[-1] == 3, (
+        f"folding robot_flows must be (T, NR, 3), got {robot_flows.shape}"
+    )
+
+    robot_data = {
+        'robot_flows': robot_flows,
+        # No gripper normals are stored for folding; emit zeros so that the
+        # robot_normals feature is shaped consistently (it is then a constant
+        # input channel — harmless for a baseline).
+        'robot_normals': np.zeros_like(robot_flows),
+        'robot_colors': np.zeros_like(robot_flows),
+    }
+
+    # Pass through every non-scene key (joint_positions, __key__, scalars, ...).
+    for key in sample.keys():
+        if not key.startswith('view'):
+            robot_data[key] = sample[key]
+
+    return robot_data
+
+
 __all__ = [
     "determine_gripper_filter",
     "_deterministic_single_arm_choice",
@@ -442,4 +612,8 @@ __all__ = [
     "canonicalize_gripper_keys_and_flags",
     "_get_robot_flows_behavior",
     "_get_robot_flows_droid",
+    "_get_robot_flows_pushing",
+    "_get_robot_flows_folding",
+    "_get_robot_flows_mould",
+    "_get_robot_flows_pickup",
 ]

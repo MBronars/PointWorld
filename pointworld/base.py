@@ -339,7 +339,8 @@ class BaseModel(nn.Module):
         self.args = args
         self.device = args.device
         self.data_info_dict = data_info_dict
-        self.T = CONTEXT_HORIZON + PRED_HORIZON
+        # PRED_HORIZON is the release default; --pred_horizon (recorded in the checkpoint contract) overrides it.
+        self.T = CONTEXT_HORIZON + int(getattr(args, "pred_horizon", PRED_HORIZON) or PRED_HORIZON)
         self.rank = rank
         self.world_size = dist.get_world_size() if args.distributed else 1
         self.channels = args.predictor_dim
@@ -434,6 +435,32 @@ class BaseModel(nn.Module):
     def forward(self, data_dict, training=True, encoded_scene_feat0=None):
         for name, tensor in data_dict.items():
             if isinstance(tensor, torch.Tensor):
+                if not torch.isfinite(tensor).all():
+                    n_bad = (~torch.isfinite(tensor)).sum().item()
+                    n_nan = torch.isnan(tensor).sum().item()
+                    n_inf = torch.isinf(tensor).sum().item()
+                    keys = data_dict.get("__key__", None)
+                    domains = data_dict.get("__domain__", None)
+                    print(f"[NaN-DEBUG] field={name} shape={tuple(tensor.shape)} "
+                          f"dtype={tensor.dtype} device={tensor.device} "
+                          f"bad={n_bad} (nan={n_nan} inf={n_inf})", flush=True)
+                    print(f"[NaN-DEBUG] __key__={keys}  __domain__={domains}", flush=True)
+                    # Locate bad positions in the per-point tensor (B, T, Ns, ...).
+                    if tensor.ndim == 4 and tensor.shape[1] > 0:
+                        B, T, Ns = tensor.shape[:3]
+                        nan_per_sample = (~torch.isfinite(tensor)).any(dim=tuple(range(1, tensor.ndim))).sum().item()
+                        print(f"[NaN-DEBUG] {nan_per_sample}/{B} samples have any non-finite", flush=True)
+                        for b in range(B):
+                            bad_t = (~torch.isfinite(tensor[b])).any(dim=tuple(range(1, tensor[b].ndim))).sum().item()
+                            if bad_t:
+                                bad_idx = (~torch.isfinite(tensor[b, 0])).any(dim=tuple(range(1, tensor[b, 0].ndim))).nonzero().flatten().cpu().numpy()
+                                rng = (int(bad_idx.min()), int(bad_idx.max())) if len(bad_idx) else (-1, -1)
+                                print(f"[NaN-DEBUG]   sample b={b} ({keys[b] if keys else '?'}): {bad_t} frames bad, t=0 bad-idx range {rng}, Ns={Ns}", flush=True)
+                                # Also report scene_exists/robot_exists at t=0 for context.
+                                se = data_dict.get("scene_exists", None)
+                                re_ = data_dict.get("robot_exists", None)
+                                if se is not None: print(f"[NaN-DEBUG]   scene_exists[b,0].sum() = {se[b,0].sum().item()}", flush=True)
+                                if re_ is not None: print(f"[NaN-DEBUG]   robot_exists[b,0].sum() = {re_[b,0].sum().item()}", flush=True)
                 assert torch.isfinite(tensor).all(), f"{name} has NaNs"
         # ------------------------- unpack data ---------------------------- #
         # unpack data

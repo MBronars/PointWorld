@@ -145,7 +145,9 @@ class Tester(Trainer):
                         f"No default dataset directory mapping for checkpoint domain {dom}. Valid keys: {valid}"
                     )
                 args.data_dirs.append(DOMAIN_TO_DATA_DIR[dom])
-        self._sim_keywords = ["behavior"]
+        # Simulation domains: no real-robot expert confidence masks exist for
+        # them, so eval should not require/await confidence-mask files.
+        self._sim_keywords = ["behavior", "folding"]
 
         args.train_domains_for_eval = list(train_domains)
         args.eval_domain_whitelist = list(eval_domains_requested)
