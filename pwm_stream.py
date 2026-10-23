@@ -36,6 +36,11 @@ ENV
                     always wins. Only `matrix_to_quaternion` and
                     `quaternion_to_axis_angle` are reached, both pure tensor code.
                     Unset it once pointworld-env has its own pytorch3d.
+    PWM_RELEASE_FROM / PWM_RELEASE_TO
+                    a moved copy of the release (e.g. pwm-data-v1-compact on PSC): every recipe path under
+                    PWM_RELEASE_FROM is re-pointed to PWM_RELEASE_TO, as gpwm's data.release_from /
+                    data.release_to do (utils/config.py relocate_release; here applied to the whole recipe, so the
+                    normalization file moves too). Both or neither; the recipe file itself is not edited.
 """
 from __future__ import annotations
 
@@ -159,10 +164,33 @@ def _import_pwm():
     return U, build_domain_dataset
 
 
+def _release_relocation():
+    old, new = os.environ.get("PWM_RELEASE_FROM"), os.environ.get("PWM_RELEASE_TO")
+    if not old and not new:
+        return None
+    if not (old and new) or not (os.path.isabs(old) and os.path.isabs(new)):
+        raise ValueError("PWM_RELEASE_FROM and PWM_RELEASE_TO must both be set to absolute paths")
+    return old.rstrip("/"), new.rstrip("/")
+
+
+def _relocate(node, relocation):
+    """Every string under the old release prefix, re-pointed (gpwm utils/config.py relocated_path)."""
+    if isinstance(node, dict):
+        return {k: _relocate(v, relocation) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_relocate(v, relocation) for v in node]
+    if isinstance(node, str):
+        old, new = relocation
+        return new + node[len(old):] if node == old or node.startswith(old + "/") else node
+    return node
+
+
 def _load_recipe(recipe: str) -> dict:
     import yaml
     with open(recipe) as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    relocation = _release_relocation()
+    return cfg if relocation is None else _relocate(cfg, relocation)
 
 
 def build_pwm_dataset(domain: str, recipe: str, mode: str, batch_size: int = 4, clip_len: int = CLIP_LEN):
