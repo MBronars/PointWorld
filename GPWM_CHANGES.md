@@ -25,6 +25,14 @@ comparison forces, and say why.
 | budget | epochs | `--budget_windows` / matched snapshots so PointWorld sees the same windows and steps as the gpwm model it is compared with (folding: 8 windows/step x 200 k = 1.6 M) | equal training |
 | window sampling | uniform | the recipe's `data.window_motion` where gpwm uses it (folding: alpha 1.0, floor 0.02 mm) | gpwm trains with it |
 
+## Run log
+
+| run | data | backbone | windows / steps | launcher |
+|---|---|---|---|---|
+| pointworld_pickup_open | pickup (pwm-data-v1) | released default | 32 x 200k (1.6M checkpoint = matched_step_050000) | `train_pointworld_pickup_open.sbatch` |
+| pointworld_folding_medium | folding_8mm | medium 99M | 8 x 200k = 1.6M (= gpwm folding) | `train_pointworld_folding_medium.sbatch` |
+| pointworld_mould_medium | pile (deformable_mould_new_6k_wds) through gpwm `mb/baselines` | medium 99M | 16 x 100k = 1.6M (= the action-conditioned windows of the pile gpwm run, 200k x 16 at 50 % dropout) | `train_pointworld_mould_medium.sbatch` |
+
 ## Changes to upstream files (commit "Library changes ...")
 
 | file | change |
