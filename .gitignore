@@ -142,3 +142,16 @@ stats/refactor_*
 !third_party/
 !third_party/dinov3/
 !third_party/dinov3/**
+
+# gpwm baseline work: outputs and local environment pieces stay out of the repo
+runs/
+inference_results/
+final_policy_rollout*/
+paper_results/
+wandb/
+stats/
+*.bak*
+pwm_shims/py/
+pwm_shims/pytorch3d
+*.png
+*.gif
