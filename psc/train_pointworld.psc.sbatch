@@ -2,7 +2,8 @@
 #SBATCH --job-name=pw_gpwm
 #SBATCH --account=cis260367p
 #SBATCH --partition=GPU-shared
-#SBATCH --gres=gpu:h100-80:2
+#SBATCH --qos=gpu
+#SBATCH --gres=gpu:l40s-48:2
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
@@ -16,8 +17,8 @@
 #   sbatch --job-name=pw_folding_medium --export=ALL,RUN=folding_medium psc/train_pointworld.psc.sbatch
 set -uo pipefail
 RUN=${RUN:?set RUN=folding_medium or RUN=pickup_open}
-PW_REPO=${PW_REPO:-/ocean/projects/cis260367p/mbronars/projects/GPWM/code/PointWorld}
-GPWM_REPO=${GPWM_REPO:-/ocean/projects/cis260367p/mbronars/projects/GPWM/code/pwm}     # gpwm, branch mb/psc-port
+PW_REPO=${PW_REPO:-/ocean/projects/cis260367p/mbronars/projects/GPWM/baselines/PointWorld}
+GPWM_REPO=${GPWM_REPO:-/ocean/projects/cis260367p/mbronars/projects/GPWM/gpwm_worktrees/psc-port}     # gpwm, branch mb/psc-port
 COMPACT=${COMPACT:-/ocean/projects/cis260367p/mbronars/projects/GPWM/data}             # pwm-data-v1-compact
 LOG_DIR=${LOG_DIR:-/ocean/projects/cis260367p/mbronars/projects/GPWM/trainings/pointworld}
 CONDA_ENV=${CONDA_ENV:-pointworld-env}

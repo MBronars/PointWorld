@@ -8,7 +8,7 @@ the gpwm 500M run on PSC. What changed from upstream PointWorld and why: `GPWM_C
 | item | PSC location |
 |---|---|
 | data: pwm-data-v1-compact (the 8 gpwm datasets, 258 GB) | `/ocean/projects/cis260367p/mbronars/projects/GPWM/data` (already copied for the gpwm run) |
-| this repo, branch `gpwm-baselines` | `$PW_REPO`, e.g. `/ocean/projects/cis260367p/mbronars/projects/GPWM/code/PointWorld` |
+| this repo, branch `gpwm-baselines` | `$PW_REPO`, e.g. `/ocean/projects/cis260367p/mbronars/projects/GPWM/baselines/PointWorld` |
 | gpwm checkout, branch `mb/psc-port` (PointWorld imports gpwm's loader from it) | `$GPWM_REPO`; the gpwm run's own checkout works |
 | run folders | `/ocean/projects/cis260367p/mbronars/projects/GPWM/trainings/pointworld/<exp>/` (family `pointworld`) |
 | slurm logs | `/ocean/projects/cis260367p/mbronars/projects/GPWM/trainings/pointworld/slurm/` |
@@ -22,7 +22,7 @@ cd "$PW_REPO" && git remote add upstream https://github.com/NVlabs/PointWorld.gi
 
 ## 2. Environment (`pointworld-env`; exact versions in `environments/pointworld-env-2026-10-23.freeze.txt`)
 
-Python 3.10, torch 2.5.1 + CUDA 12.4. All of these support the H100 (sm_90).
+Python 3.10, torch 2.5.1 + CUDA 12.4. All of these support the L40S (sm_89) the runs use, and the H100 (sm_90).
 
 ```bash
 conda create -n pointworld-env python=3.10 -y && conda activate pointworld-env
@@ -31,16 +31,16 @@ pip install spconv-cu124==2.3.8 cumm-cu124==0.7.11
 pip install torch_scatter==2.1.2 -f https://data.pyg.org/whl/torch-2.5.0+cu124.html
 pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
 grep -v -E '^(torch|torchvision|spconv|cumm|torch_scatter|flash_attn)' environments/pointworld-env-2026-10-23.freeze.txt > /tmp/pw_rest.txt
-pip install -r /tmp/pw_rest.txt          # includes zstandard (compact folding clips) and webdataset
+pip install --no-deps -r /tmp/pw_rest.txt   # exact freeze (urdfpy pins networkx==2.2, the env runs 3.4.2); includes zstandard and webdataset
 python -c "import torch, spconv, flash_attn, torch_scatter, zstandard; print(torch.cuda.get_arch_list())"
 ```
 
 gpwm's loader imports `pytorch3d` on a path PointWorld never uses (yikai pose channels), so `pwm_stream.py` appends
-`$PW_REPO/pwm_shims` to `sys.path` (env `PWM_PYTORCH3D`). Point the link at the gpwm environment on PSC (`pwm211`,
+`$PW_REPO/pwm_shims` to `sys.path` (env `PWM_PYTORCH3D`). Point the link at the gpwm environment on PSC (`gpwm`, built as `pwm211`
 built by gpwm's PSC_SETUP.md); only two pure-tensor functions are reached:
 
 ```bash
-ln -sfn "$(conda run -n pwm211 python -c 'import pytorch3d, os; print(os.path.dirname(pytorch3d.__file__))')" "$PW_REPO/pwm_shims/pytorch3d"
+ln -sfn "$(conda run -n gpwm python -c 'import pytorch3d, os; print(os.path.dirname(pytorch3d.__file__))')" "$PW_REPO/pwm_shims/pytorch3d"
 ```
 
 ## 3. Data
@@ -66,7 +66,7 @@ sc, rb = next(S.iter_window_arrays('folding', r, 'test', 4, 17)); print(sc.shape
 
 `psc/train_pointworld.psc.sbatch` holds both current runs (`RUN=folding_medium`, `RUN=pickup_open`) with the
 settings of their babel launchers. **Confirm the scheduler lines first**: account `cis260367p`, partition
-`GPU-shared` and `--gres=gpu:h100-80:2` are this script's assumptions (2 GPUs; batch per GPU and accumulation keep
+`GPU-shared`, `--qos=gpu` and `--gres=gpu:l40s-48:2` (gl001-003: 8 L40S, 192 CPUs, 1 TB) are this script's assumptions (2 GPUs; batch per GPU and accumulation keep
 the windows per step of the babel runs). Bridges-2 caps the wall time per job; resubmitting the same command resumes
 from `<exp>/latest.pt`.
 
