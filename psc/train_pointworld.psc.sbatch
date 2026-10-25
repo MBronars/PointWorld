@@ -10,6 +10,8 @@
 #SBATCH --time=48:00:00
 #SBATCH --output=/ocean/projects/cis260367p/mbronars/projects/GPWM/trainings/pointworld/slurm/%x_%j.out
 #SBATCH --error=/ocean/projects/cis260367p/mbronars/projects/GPWM/trainings/pointworld/slurm/%x_%j.err
+#SBATCH --requeue
+#SBATCH --open-mode=append
 # PointWorld baseline for gpwm on PSC Bridges-2. One script, two runs (RUN=folding_medium | pickup_open); every
 # setting matches the babel launcher of the same run (train_pointworld_folding_medium.sbatch /
 # train_pointworld_pickup_open.sbatch), only paths and the scheduler lines differ. CONFIRM the partition and gres
@@ -46,10 +48,19 @@ export PWM_RELEASE_FROM=/data/group_data/katefgroup-ssd/world_model/particle_wor
 export PW_NCCL_TIMEOUT_MIN=60 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True WANDB_DIR=$LOG_DIR/$EXP
 mkdir -p "$LOG_DIR/$EXP" "$LOG_DIR/slurm"
 RESUME=""; [ -f "$LOG_DIR/$EXP/latest.pt" ] && RESUME="--model_path $LOG_DIR/$EXP/latest.pt"
-echo "$(date) job ${SLURM_JOB_ID:-local} $(hostname) RUN=$RUN EXP=$EXP resume=${RESUME:-none}"; nvidia-smi -L
+RESTART=${SLURM_RESTART_COUNT:-0}; MAX_RESTARTS=${MAX_RESTARTS:-3}
+echo "$(date) job ${SLURM_JOB_ID:-local} $(hostname) RUN=$RUN EXP=$EXP restart=$RESTART resume=${RESUME:-none}"; nvidia-smi -L
 torchrun --standalone --nproc_per_node=$NPROC train.py --distributed true \
   --domains $DOMAIN --data_dirs "$DATA" --norm_stats_path "$STATS" \
   --exp_name $EXP --log_dir "$LOG_DIR" --pred_horizon 16 \
   --batch_size $MICRO --grad_accum_steps $ACCUM --budget_windows ${BUDGET_OVERRIDE:-$BUDGET} --num_epochs 100000 \
   --grid_size 0.001 --num_workers 6 --eval_freq 500 --save_freq 2000 --num_eval_batches 25 \
   --snapshot_matched_steps 10000 --matched_windows_per_step $MATCHED $EXTRA $RESUME
+rc=$?
+# A crash requeues the job, which resumes from latest.pt (saved every ~28 min). 2026-10-24: rank 1 took a SIGBUS after
+# 8.6 h (the only one on PSC so far; not memory, /dev/shm was empty), most likely a Lustre read failing on a mapped
+# page. The time limit kills this script and is not requeued; MAX_RESTARTS stops a crash loop.
+if [ $rc -ne 0 ] && [ -n "${SLURM_JOB_ID:-}" ] && [ "$RESTART" -lt "$MAX_RESTARTS" ]; then
+  echo "$(date) train.py exited $rc: requeue $((RESTART + 1)) of $MAX_RESTARTS"; scontrol requeue "$SLURM_JOB_ID"
+fi
+exit $rc
