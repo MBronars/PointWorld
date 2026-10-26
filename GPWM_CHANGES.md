@@ -32,6 +32,7 @@ comparison forces, and say why.
 | pointworld_pickup_open | pickup (pwm-data-v1) | released default | 32 x 200k (1.6M checkpoint = matched_step_050000) | `train_pointworld_pickup_open.sbatch` |
 | pointworld_folding_medium | folding_8mm | medium 99M | 8 x 200k = 1.6M (= gpwm folding) | `train_pointworld_folding_medium.sbatch` |
 | pointworld_mould_medium | pile (deformable_mould_new_6k_wds) through gpwm `mb/baselines` | medium 99M | 16 x 100k = 1.6M (= the action-conditioned windows of the pile gpwm run, 200k x 16 at 50 % dropout) | `train_pointworld_mould_medium.sbatch` |
+| pointworld_pushing_medium | block pushing (pwm-data-v1 pushing, clean4 recipe roots + exclusions) | medium 99M | 16 x 100k = 1.6M | `train_pointworld_pushing_medium.sbatch` |
 
 ## Changes to upstream files (commit "Library changes ...")
 

@@ -68,6 +68,7 @@ PW_TO_PWM = {
     "pickup_rl_push": "rl_push",
     "pickup_dex": "dex",
     "pickup_folding": "folding",          # pwm-data-v1 folding_8mm (cloth, 30 Hz), 2026-10-22
+    "pickup_pushing": "pushing",          # pwm-data-v1 pushing (block pushing: rod + block, 128 + 128 points), 2026-10-26
     "pickup_mould": "mould",              # pile manipulation (deformable_mould_new_6k_wds; needs a gpwm checkout with the mould domain), 2026-10-24
 }
 
@@ -77,8 +78,8 @@ PW_TO_PWM = {
 # The numbers are the indexed clip counts TRAINING.md records for each corpus, so
 # one nominal epoch is "one window per indexed clip".
 NOMINAL_WINDOWS = {
-    "train": {"yikai": 17661, "pickup": 42253, "rl_push": 50815, "dex": 16999, "folding": 4510, "mould": 5904},
-    "test": {"yikai": 334, "pickup": 200, "rl_push": 200, "dex": 174, "folding": 236, "mould": 96},
+    "train": {"yikai": 17661, "pickup": 42253, "rl_push": 50815, "dex": 16999, "folding": 4510, "mould": 5904, "pushing": 93184},
+    "test": {"yikai": 334, "pickup": 200, "rl_push": 200, "dex": 174, "folding": 236, "mould": 96, "pushing": 100},
 }
 
 PWM_SPLIT = {"train": "train", "test": "val"}
