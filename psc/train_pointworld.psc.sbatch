@@ -18,7 +18,7 @@
 # lines on Bridges-2 before the first submit (PSC_SETUP.md). Resubmit the same command to resume from latest.pt.
 #   sbatch --job-name=pw_folding_medium --export=ALL,RUN=folding_medium psc/train_pointworld.psc.sbatch
 set -uo pipefail
-RUN=${RUN:?set RUN=folding_medium or RUN=pickup_open}
+RUN=${RUN:?set RUN=folding_medium, pickup_open, rl_push_medium or yikai_medium}
 PW_REPO=${PW_REPO:-/ocean/projects/cis260367p/mbronars/projects/GPWM/baselines/PointWorld}
 GPWM_REPO=${GPWM_REPO:-/ocean/projects/cis260367p/mbronars/projects/GPWM/gpwm_worktrees/psc-port}     # gpwm, branch mb/psc-port
 COMPACT=${COMPACT:-/ocean/projects/cis260367p/mbronars/projects/GPWM/data}             # pwm-data-v1-compact
@@ -37,6 +37,18 @@ case $RUN in
     EXP=pointworld_pickup_open; DOMAIN=pickup_release; DATA="pwm://pickup@$RECIPE"; STATS=$PW_REPO/psc/norm_stats/pickup_open
     MICRO=8; ACCUM=2; BUDGET=6400000; MATCHED=32
     EXTRA="--robot_features robot_flows,gripper_open,robot_velocity,robot_acceleration --scene_features scene_flows,gripper_open,dist2robot" ;;
+  rl_push_medium)  # Table 1 Pushing (docs/TABLE1_PUSHING_PICKPLACE.md): rl_push only, 99M medium, 2 GPUs x 8 x 2 = 32
+                   # windows/step x 200k = 6.4M windows (= gpwm's rl_push specialist)
+    EXP=pointworld_rl_push_medium; DOMAIN=pickup_rl_push; DATA="pwm://rl_push@$RECIPE"; STATS=$PW_REPO/psc/norm_stats/rl_push
+    MICRO=8; ACCUM=2; BUDGET=6400000; MATCHED=32
+    EXTRA="--ptv3_size medium --predictor_dim 192 --param_nan_checks false
+           --robot_features robot_flows,robot_velocity,robot_acceleration --scene_features scene_flows,dist2robot" ;;
+  yikai_medium)    # Table 1 Pick and Place: FULL yikai only (the unified recipe's root, not yikai_small), 99M medium,
+                   # 2 GPUs x 4 x 2 = 16 windows/step x 200k = 3.2M windows (= gpwm's yikai specialist)
+    EXP=pointworld_yikai_medium; DOMAIN=pickup_yikai_small; DATA="pwm://yikai@$RECIPE"; STATS=$PW_REPO/psc/norm_stats/yikai
+    MICRO=4; ACCUM=2; BUDGET=3200000; MATCHED=16
+    EXTRA="--ptv3_size medium --predictor_dim 192 --param_nan_checks false
+           --robot_features robot_flows,robot_velocity,robot_acceleration --scene_features scene_flows,dist2robot" ;;
   *) echo "unknown RUN=$RUN" >&2; exit 2 ;;
 esac
 source "$(conda info --base)/etc/profile.d/conda.sh" && conda activate "$CONDA_ENV"
